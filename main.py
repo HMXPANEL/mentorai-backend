@@ -102,18 +102,21 @@ TONE_MAP: dict[str, str] = {
     "socratic":  "Use the Socratic method. Ask probing questions to guide the user to their own insights.",
 }
 
-# ── Firebase Initialization ───────────────────────────────────────────────
+# ── Firebase Initialization (Render Safe) ───────────────────────────────
 
 if not firebase_admin._apps:
-    cred_path = "firebase-admin.json"
-    
-    if os.path.exists(cred_path):
-        cred = credentials.Certificate(cred_path)
-        firebase_admin.initialize_app(cred)
-    elif os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-        firebase_admin.initialize_app()
-    else:
+    firebase_json = os.getenv("FIREBASE_ADMIN_JSON")
+
+    if not firebase_json:
         raise RuntimeError("Firebase credentials not configured.")
+
+    try:
+        cred_dict = json.loads(firebase_json)
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+        log.info("Firebase initialized from environment ✓")
+    except Exception as e:
+        raise RuntimeError(f"Invalid Firebase credentials: {e}")
 
 # ── NVIDIA OpenAI client (singleton) ──────────────────────────────────────
 
