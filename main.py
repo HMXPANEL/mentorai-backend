@@ -51,7 +51,17 @@ if not NVIDIA_API_KEY:
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 # CORS Configuration
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5500")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://mentorai-blush.vercel.app",
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Plan Limits
 FREE_MAX_TOKENS   = 1024
