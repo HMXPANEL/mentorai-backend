@@ -205,11 +205,11 @@ def trunc(s: str, n: int) -> str:
 # ── Pydantic models ────────────────────────────────────────────────────────
 
 class HistMsg(BaseModel):
-    role:    str = Field(..., pattern="^(user|assistant)$")
+    role: str = Field(..., regex="^(user|assistant)$")
     content: str
 
 class Attachment(BaseModel):
-    type:     str   = Field(..., pattern="^(text|image)$")
+    type: str = Field(..., regex="^(text|image)$")
     name:     str   = Field(default="file")
     content:  str   = Field(default="")   
     mimeType: str   = Field(default="text/plain")
