@@ -1,5 +1,5 @@
 """
-MentorAI Backend v4.6 — Enterprise Stable (422 Fixed)
+MentorAI Backend v4.7 — Enterprise Stable (Fixed 403/422)
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 from openai import OpenAI, APIConnectionError
 
@@ -117,6 +117,7 @@ def check_burst_limit(uid: str):
     _burst_tracker[uid] = recent
 
     if len(recent) >= BURST_LIMIT:
+        log.warning(f"Burst limit exceeded for uid={uid}")
         raise HTTPException(429, "Too many requests. Please slow down.")
 
     _burst_tracker[uid].append(now)
@@ -133,14 +134,15 @@ _INJECT = re.compile(
 
 def sanitize(text: str) -> str:
     if len(text) > MAX_INPUT_CHARS:
-        raise HTTPException(400, "Message too long")
+        raise HTTPException(400, f"Message too long (limit {MAX_INPUT_CHARS} chars)")
     if _INJECT.search(text):
+        log.warning(f"Injection pattern detected in input: {text[:50]}...")
         raise HTTPException(400, "Invalid input pattern detected")
     return text.strip()
 
 
 # ─────────────────────────────────────────────
-# Authentication & Usage
+# Authentication & Usage (FIXED 403)
 # ─────────────────────────────────────────────
 
 async def get_current_user(request: Request):
@@ -155,11 +157,13 @@ async def get_current_user(request: Request):
     try:
         decoded = await loop.run_in_executor(None, auth.verify_id_token, token)
         uid = decoded["uid"]
-    except Exception:
+    except Exception as e:
+        log.error(f"Token verification failed: {e}")
         raise HTTPException(401, "Invalid token")
 
     if not decoded.get("email_verified", False):
-        raise HTTPException(403, "Email not verified")
+        log.warning(f"Access denied: Email not verified for uid={uid}")
+        raise HTTPException(403, "Email not verified. Please check your inbox.")
 
     check_burst_limit(uid)
 
@@ -168,9 +172,21 @@ async def get_current_user(request: Request):
     @firestore.transactional
     def resolve_usage(transaction, ref):
         doc = ref.get(transaction=transaction)
+        
+        now_day = int(time.time()) // 86400
 
+        # 🔥 FIX: Auto-create user document if missing
         if not doc.exists:
-            raise HTTPException(403, "User record not found")
+            log.info(f"Creating new user document for uid={uid}")
+            new_data = {
+                "plan": "free",
+                "dailyMessageCount": 1,  # Count this first message
+                "lastResetDate": now_day,
+                "email": decoded.get("email", ""),
+                "createdAt": firestore.SERVER_TIMESTAMP
+            }
+            transaction.set(ref, new_data)
+            return "free"
 
         data = doc.to_dict()
         plan = data.get("plan", "free")
@@ -178,16 +194,17 @@ async def get_current_user(request: Request):
         if plan == "pro":
             return "pro"
 
-        now_day = int(time.time()) // 86400
         count = data.get("dailyMessageCount", 0)
         last_day = data.get("lastResetDate", 0)
 
+        # Reset counter if it's a new day
         if last_day != now_day:
             count = 0
             last_day = now_day
 
         if count >= DAILY_FREE_LIMIT:
-            raise HTTPException(403, "Daily free limit reached")
+            log.warning(f"Daily limit reached for uid={uid}")
+            raise HTTPException(403, "Daily free limit reached. Please upgrade to Pro.")
 
         transaction.update(ref, {
             "dailyMessageCount": count + 1,
@@ -224,24 +241,24 @@ class HistMsg(BaseModel):
     @classmethod
     def validate_content(cls, v):
         if len(v) > MAX_INPUT_CHARS:
-            raise ValueError("History message too long")
+            raise ValueError(f"History message too long (limit {MAX_INPUT_CHARS})")
         return v
-
 
 class ChatReq(BaseModel):
     message: str
     history: list[HistMsg] = Field(default_factory=list)
 
-    # 🔥 CRITICAL FIX — Ignore extra frontend fields
-    model_config = {
-        "extra": "ignore"
-    }
+    # 🔥 CRITICAL FIX: Use ConfigDict for Pydantic v2
+    model_config = ConfigDict(
+        extra="ignore",  # Ignore fields like 'tone', 'nickname', etc.
+        str_strip_whitespace=True
+    )
 
     @field_validator("history")
     @classmethod
     def validate_history(cls, v):
         if len(v) > MAX_HISTORY_TURNS:
-            raise ValueError("History too long")
+            raise ValueError(f"History too long (limit {MAX_HISTORY_TURNS} turns)")
         return v
 
 
@@ -274,6 +291,7 @@ async def sse_stream(messages: list[dict]):
                     )
         except Exception as e:
             log.error(f"Streaming error: {e}")
+            # Push error to queue if needed, or just end
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
@@ -292,7 +310,7 @@ async def sse_stream(messages: list[dict]):
 # FastAPI App
 # ─────────────────────────────────────────────
 
-app = FastAPI(title="MentorAI API", version="4.6.0-enterprise-stable")
+app = FastAPI(title="MentorAI API", version="4.7.0-enterprise-stable")
 
 app.add_middleware(
     CORSMiddleware,
@@ -305,7 +323,7 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    return {"status": "online"}
+    return {"status": "online", "version": "4.7"}
 
 @app.get("/health")
 async def health():
@@ -359,6 +377,8 @@ async def global_error(request: Request, exc: Exception):
         )
 
     if isinstance(exc, RequestValidationError):
+        # 🔥 ENHANCED LOGGING FOR 422
+        log.warning(f"422 Validation Error: {exc.errors()}")
         return JSONResponse(
             status_code=422,
             content={"detail": exc.errors()}
